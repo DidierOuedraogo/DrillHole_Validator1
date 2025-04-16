@@ -184,14 +184,73 @@ def check_duplicates(data, file_type):
     else:
         return pd.DataFrame()
 
-# Fonction pour vérifier les échantillons composites proches
+# Fonction améliorée pour vérifier les échantillons composites proches
 def check_nearby_composites(composite_data, distance_threshold=0.1):
-    if 'x' not in composite_data.columns or 'y' not in composite_data.columns or 'z' not in composite_data.columns:
-        st.error("Les données de composite doivent contenir les colonnes x, y et z pour la vérification des échantillons proches.")
-        return None
+    # Vérifier si les colonnes de coordonnées existent
+    required_columns = ['x', 'y', 'z']
+    missing_columns = [col for col in required_columns if col not in composite_data.columns]
+    
+    if missing_columns:
+        # Si certaines colonnes sont manquantes, proposer des solutions
+        st.error(f"Colonnes manquantes dans les données de composite: {', '.join(missing_columns)}")
+        
+        # Vérifier si des colonnes alternatives existent
+        alternative_columns = {
+            'x': ['east', 'easting', 'xcoord', 'x_coord', 'eastcoord', 'x_m'],
+            'y': ['north', 'northing', 'ycoord', 'y_coord', 'northcoord', 'y_m'],
+            'z': ['elevation', 'elev', 'zcoord', 'z_coord', 'altitude', 'z_m']
+        }
+        
+        # Suggérer des alternatives ou permettre à l'utilisateur de mapper les colonnes
+        column_mapping = {}
+        for col in missing_columns:
+            potential_matches = [alt for alt in alternative_columns[col] if alt in composite_data.columns]
+            
+            if potential_matches:
+                # Si des alternatives potentielles sont trouvées, suggérer la première
+                st.info(f"Colonne '{col}' manquante. Colonnes potentiellement équivalentes trouvées: {', '.join(potential_matches)}")
+                selected_col = st.selectbox(f"Sélectionnez la colonne à utiliser pour '{col}':", 
+                                            options=potential_matches, 
+                                            key=f"map_{col}")
+                column_mapping[col] = selected_col
+            else:
+                st.warning(f"Aucune colonne alternative pour '{col}' n'a été trouvée.")
+                return None
+        
+        # Si l'utilisateur a mappé toutes les colonnes manquantes, créer une copie avec les bonnes colonnes
+        if len(column_mapping) == len(missing_columns):
+            st.info("Application du mapping de colonnes...")
+            temp_data = composite_data.copy()
+            for target_col, source_col in column_mapping.items():
+                temp_data[target_col] = temp_data[source_col]
+            composite_data = temp_data
+        else:
+            return None
+    
+    # Vérifier si les colonnes contiennent des données numériques
+    for col in required_columns:
+        if not pd.api.types.is_numeric_dtype(composite_data[col]):
+            try:
+                # Essayer de convertir en nombre
+                composite_data[col] = pd.to_numeric(composite_data[col])
+                st.info(f"La colonne '{col}' a été convertie en type numérique.")
+            except:
+                st.error(f"La colonne '{col}' contient des valeurs non numériques qui ne peuvent pas être converties.")
+                return None
+    
+    # Vérifier les valeurs manquantes
+    missing_values = composite_data[required_columns].isna().sum().sum()
+    if missing_values > 0:
+        st.warning(f"Les données contiennent {missing_values} valeurs manquantes dans les coordonnées. Ces points seront ignorés.")
+        composite_data = composite_data.dropna(subset=required_columns)
     
     # Extraire les coordonnées
-    coords = composite_data[['x', 'y', 'z']].values
+    coords = composite_data[required_columns].values
+    
+    # Vérifier qu'il reste suffisamment de points
+    if len(coords) < 2:
+        st.error("Pas assez de points avec des coordonnées valides pour effectuer l'analyse.")
+        return None
     
     # Utiliser KNN pour trouver les points proches
     nbrs = NearestNeighbors(n_neighbors=2, algorithm='ball_tree').fit(coords)
@@ -206,8 +265,8 @@ def check_nearby_composites(composite_data, distance_threshold=0.1):
                 'point1_index': i,
                 'point2_index': idx[1],
                 'distance': dist[1],
-                'point1_holeid': composite_data.iloc[i]['holeid'],
-                'point2_holeid': composite_data.iloc[idx[1]]['holeid'],
+                'point1_holeid': composite_data.iloc[i]['holeid'] if 'holeid' in composite_data.columns else f"Point_{i}",
+                'point2_holeid': composite_data.iloc[idx[1]]['holeid'] if 'holeid' in composite_data.columns else f"Point_{idx[1]}",
                 'point1_coords': coords[i],
                 'point2_coords': coords[idx[1]]
             })
@@ -234,7 +293,7 @@ def export_to_excel(validation_results):
             })
             pd.concat([missing_df, extra_df]).to_excel(writer, sheet_name=result_name[:31])
     
-    writer.save()
+    writer.close()  # Remplace writer.save() qui est déprécié
     processed_data = output.getvalue()
     return processed_data
 
