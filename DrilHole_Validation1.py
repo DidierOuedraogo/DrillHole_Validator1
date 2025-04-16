@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.neighbors import NearestNeighbors
+from scipy.spatial import KDTree
 import base64
 from datetime import datetime
 
@@ -222,6 +223,7 @@ def check_nearby_composites(composite_data, distance_threshold=0.1, column_mappi
     # Vérifier les valeurs manquantes
     missing_values = composite_data[required_columns].isna().sum().sum()
     if missing_values > 0:
+        st.warning(f"Les données contiennent {missing_values} valeurs manquantes dans les coordonnées. Ces points seront ignorés.")
         composite_data = composite_data.dropna(subset=required_columns)
     
     # Extraire les coordonnées
@@ -231,33 +233,69 @@ def check_nearby_composites(composite_data, distance_threshold=0.1, column_mappi
     if len(coords) < 2:
         return {'status': 'error', 'message': "Pas assez de points avec des coordonnées valides pour effectuer l'analyse."}
     
-    # Utiliser KNN pour trouver les points proches
-    try:
-        nbrs = NearestNeighbors(n_neighbors=2, algorithm='ball_tree').fit(coords)
-        distances, indices = nbrs.kneighbors(coords)
-    except Exception as e:
-        return {'status': 'error', 'message': f"Erreur lors de l'analyse des voisins les plus proches: {str(e)}"}
+    # Statistics avant de commencer
+    point_count = len(coords)
+    st.info(f"Analyse de {point_count} points avec un seuil de distance de {distance_threshold} m")
     
-    # Filtrer les points dont la distance est inférieure au seuil
-    close_points = []
-    for i, (dist, idx) in enumerate(zip(distances, indices)):
-        # idx[0] est le point lui-même, idx[1] est le voisin le plus proche
-        if dist[1] < distance_threshold:
+    # Utiliser un arbre KD pour trouver les points proches de manière efficace
+    try:
+        tree = KDTree(coords)
+        
+        # Chercher tous les points dans un rayon de distance_threshold
+        # Retourne les paires d'indices où les points sont à moins de distance_threshold l'un de l'autre
+        pairs = tree.query_pairs(distance_threshold, output_type='ndarray')
+        
+        # Si aucune paire n'est trouvée
+        if len(pairs) == 0:
+            return {'status': 'empty', 'message': f"Aucun point proche trouvé avec un seuil de {distance_threshold} m"}
+        
+        # Convertir les paires en un format plus utile
+        close_points = []
+        for i, j in pairs:
+            i, j = int(i), int(j)  # Convertir en entiers pour l'indexation
+            # Calculer la distance entre les points
+            dist = np.linalg.norm(coords[i] - coords[j])
             close_points.append({
                 'point1_index': i,
-                'point2_index': idx[1],
-                'distance': dist[1],
+                'point2_index': j,
+                'distance': float(dist),
                 'point1_holeid': composite_data.iloc[i]['holeid'] if 'holeid' in composite_data.columns else f"Point_{i}",
-                'point2_holeid': composite_data.iloc[idx[1]]['holeid'] if 'holeid' in composite_data.columns else f"Point_{idx[1]}",
+                'point2_holeid': composite_data.iloc[j]['holeid'] if 'holeid' in composite_data.columns else f"Point_{j}",
                 'point1_coords': coords[i],
-                'point2_coords': coords[idx[1]]
+                'point2_coords': coords[j]
             })
+        
+        # Tri des résultats par distance (croissante)
+        close_points.sort(key=lambda x: x['distance'])
+        
+        # Limiter le nombre de résultats pour l'affichage si nécessaire
+        display_limit = 10000  # Limite arbitraire pour l'affichage
+        if len(close_points) > display_limit:
+            st.warning(f"Plus de {display_limit} paires trouvées. Seules les {display_limit} paires les plus proches seront affichées.")
+            display_points = close_points[:display_limit]
+        else:
+            display_points = close_points
+        
+        # Calculer le nombre de points uniques impliqués dans des paires
+        unique_points = set()
+        for cp in close_points:
+            unique_points.add(cp['point1_index'])
+            unique_points.add(cp['point2_index'])
+        
+        # Retourner les résultats avec un statut
+        return {
+            'status': 'success', 
+            'points': display_points,
+            'count': len(close_points),
+            'total_points': point_count,
+            'total_distinct_points': len(unique_points)
+        }
     
-    # Retourner les résultats avec un statut
-    if close_points:
-        return {'status': 'success', 'points': close_points, 'count': len(close_points)}
-    else:
-        return {'status': 'empty', 'message': f"Aucun point proche trouvé avec un seuil de {distance_threshold} m"}
+    except Exception as e:
+        import traceback
+        st.error(f"Erreur lors de l'analyse des voisins les plus proches: {str(e)}")
+        st.error(traceback.format_exc())
+        return {'status': 'error', 'message': f"Erreur lors de l'analyse des voisins: {str(e)}"}
 
 # Fonction pour exporter les résultats
 def export_to_excel(validation_results):
@@ -557,7 +595,11 @@ with tab3:
                     st.success(f"Aucune paire d'échantillons composites n'a été trouvée à moins de {distance_threshold} mètres l'un de l'autre.")
                 elif result['status'] == 'success':
                     close_points = result['points']
+                    unique_points_count = result.get('total_distinct_points', 0)
+                    total_points = result.get('total_points', 0)
+                    
                     st.warning(f"Détection de {result['count']} paires d'échantillons composites proches")
+                    st.info(f"{unique_points_count} points distincts sur {total_points} ({unique_points_count/total_points*100:.1f}%) sont impliqués dans des paires proches")
                     
                     # Créer un DataFrame pour afficher les résultats
                     close_df = pd.DataFrame([{
@@ -581,13 +623,21 @@ with tab3:
                         y_col = st.session_state.column_mapping.get('y', 'y') if st.session_state.column_mapping else 'y'
                         z_col = st.session_state.column_mapping.get('z', 'z') if st.session_state.column_mapping else 'z'
                         
+                        # Limiter le nombre de points pour la visualisation si nécessaire
+                        max_display_points = 5000  # Pour la performance du navigateur
+                        composite_viz = st.session_state.composite_data
+                        
+                        if len(composite_viz) > max_display_points:
+                            st.warning(f"Réduction du nombre de points affichés à {max_display_points} pour la visualisation (sur {len(composite_viz)} au total)")
+                            composite_viz = composite_viz.sample(max_display_points, random_state=42)
+                        
                         fig = go.Figure()
                         
                         # Ajouter tous les points
                         fig.add_trace(go.Scatter3d(
-                            x=st.session_state.composite_data[x_col],
-                            y=st.session_state.composite_data[y_col],
-                            z=st.session_state.composite_data[z_col],
+                            x=composite_viz[x_col],
+                            y=composite_viz[y_col],
+                            z=composite_viz[z_col],
                             mode='markers',
                             marker=dict(
                                 size=3,
@@ -597,13 +647,19 @@ with tab3:
                             name='Tous les composites'
                         ))
                         
-                        # Ajouter les points proches
+                        # Collecter les indices des points proches
                         close_indices = set()
                         for cp in close_points:
                             close_indices.add(cp['point1_index'])
                             close_indices.add(cp['point2_index'])
                         
-                        close_points_df = st.session_state.composite_data.iloc[list(close_indices)]
+                        # Limiter le nombre de points proches pour la visualisation
+                        close_indices = list(close_indices)
+                        if len(close_indices) > max_display_points:
+                            st.warning(f"Réduction du nombre de points proches affichés à {max_display_points} (sur {len(close_indices)} au total)")
+                            close_indices = close_indices[:max_display_points]
+                        
+                        close_points_df = st.session_state.composite_data.iloc[close_indices]
                         
                         fig.add_trace(go.Scatter3d(
                             x=close_points_df[x_col],
