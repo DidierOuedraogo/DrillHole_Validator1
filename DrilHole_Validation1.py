@@ -60,6 +60,13 @@ def add_custom_css():
         .sidebar .sidebar-content {
             background-color: #2c3e50;
         }
+        .mapping-box {
+            background-color: #f0f5ff;
+            padding: 1rem;
+            border-radius: 8px;
+            margin-bottom: 1rem;
+            border-left: 4px solid #4b7bec;
+        }
     </style>
     """, unsafe_allow_html=True)
 
@@ -81,6 +88,8 @@ if 'validation_results' not in st.session_state:
     st.session_state.validation_results = {}
 if 'composite_data' not in st.session_state:
     st.session_state.composite_data = None
+if 'column_mapping' not in st.session_state:
+    st.session_state.column_mapping = {}
 
 # Fonction pour charger un fichier
 def load_file(file, file_type):
@@ -185,47 +194,21 @@ def check_duplicates(data, file_type):
         return pd.DataFrame()
 
 # Fonction améliorée pour vérifier les échantillons composites proches
-def check_nearby_composites(composite_data, distance_threshold=0.1):
+def check_nearby_composites(composite_data, distance_threshold=0.1, column_mapping=None):
+    # Appliquer le mapping de colonnes si fourni
+    if column_mapping and all(k in column_mapping for k in ['x', 'y', 'z']):
+        temp_data = composite_data.copy()
+        for target_col, source_col in column_mapping.items():
+            if source_col in composite_data.columns:
+                temp_data[target_col] = temp_data[source_col]
+        composite_data = temp_data
+    
     # Vérifier si les colonnes de coordonnées existent
     required_columns = ['x', 'y', 'z']
     missing_columns = [col for col in required_columns if col not in composite_data.columns]
     
     if missing_columns:
-        # Si certaines colonnes sont manquantes, proposer des solutions
-        st.error(f"Colonnes manquantes dans les données de composite: {', '.join(missing_columns)}")
-        
-        # Vérifier si des colonnes alternatives existent
-        alternative_columns = {
-            'x': ['east', 'easting', 'xcoord', 'x_coord', 'eastcoord', 'x_m'],
-            'y': ['north', 'northing', 'ycoord', 'y_coord', 'northcoord', 'y_m'],
-            'z': ['elevation', 'elev', 'zcoord', 'z_coord', 'altitude', 'z_m']
-        }
-        
-        # Suggérer des alternatives ou permettre à l'utilisateur de mapper les colonnes
-        column_mapping = {}
-        for col in missing_columns:
-            potential_matches = [alt for alt in alternative_columns[col] if alt in composite_data.columns]
-            
-            if potential_matches:
-                # Si des alternatives potentielles sont trouvées, suggérer la première
-                st.info(f"Colonne '{col}' manquante. Colonnes potentiellement équivalentes trouvées: {', '.join(potential_matches)}")
-                selected_col = st.selectbox(f"Sélectionnez la colonne à utiliser pour '{col}':", 
-                                            options=potential_matches, 
-                                            key=f"map_{col}")
-                column_mapping[col] = selected_col
-            else:
-                st.warning(f"Aucune colonne alternative pour '{col}' n'a été trouvée.")
-                return None
-        
-        # Si l'utilisateur a mappé toutes les colonnes manquantes, créer une copie avec les bonnes colonnes
-        if len(column_mapping) == len(missing_columns):
-            st.info("Application du mapping de colonnes...")
-            temp_data = composite_data.copy()
-            for target_col, source_col in column_mapping.items():
-                temp_data[target_col] = temp_data[source_col]
-            composite_data = temp_data
-        else:
-            return None
+        return {'status': 'error', 'message': f"Colonnes manquantes dans les données de composite: {', '.join(missing_columns)}"}
     
     # Vérifier si les colonnes contiennent des données numériques
     for col in required_columns:
@@ -233,15 +216,12 @@ def check_nearby_composites(composite_data, distance_threshold=0.1):
             try:
                 # Essayer de convertir en nombre
                 composite_data[col] = pd.to_numeric(composite_data[col])
-                st.info(f"La colonne '{col}' a été convertie en type numérique.")
-            except:
-                st.error(f"La colonne '{col}' contient des valeurs non numériques qui ne peuvent pas être converties.")
-                return None
+            except Exception as e:
+                return {'status': 'error', 'message': f"Échec de conversion de la colonne '{col}' en type numérique: {str(e)}"}
     
     # Vérifier les valeurs manquantes
     missing_values = composite_data[required_columns].isna().sum().sum()
     if missing_values > 0:
-        st.warning(f"Les données contiennent {missing_values} valeurs manquantes dans les coordonnées. Ces points seront ignorés.")
         composite_data = composite_data.dropna(subset=required_columns)
     
     # Extraire les coordonnées
@@ -249,12 +229,14 @@ def check_nearby_composites(composite_data, distance_threshold=0.1):
     
     # Vérifier qu'il reste suffisamment de points
     if len(coords) < 2:
-        st.error("Pas assez de points avec des coordonnées valides pour effectuer l'analyse.")
-        return None
+        return {'status': 'error', 'message': "Pas assez de points avec des coordonnées valides pour effectuer l'analyse."}
     
     # Utiliser KNN pour trouver les points proches
-    nbrs = NearestNeighbors(n_neighbors=2, algorithm='ball_tree').fit(coords)
-    distances, indices = nbrs.kneighbors(coords)
+    try:
+        nbrs = NearestNeighbors(n_neighbors=2, algorithm='ball_tree').fit(coords)
+        distances, indices = nbrs.kneighbors(coords)
+    except Exception as e:
+        return {'status': 'error', 'message': f"Erreur lors de l'analyse des voisins les plus proches: {str(e)}"}
     
     # Filtrer les points dont la distance est inférieure au seuil
     close_points = []
@@ -271,7 +253,11 @@ def check_nearby_composites(composite_data, distance_threshold=0.1):
                 'point2_coords': coords[idx[1]]
             })
     
-    return close_points
+    # Retourner les résultats avec un statut
+    if close_points:
+        return {'status': 'success', 'points': close_points, 'count': len(close_points)}
+    else:
+        return {'status': 'empty', 'message': f"Aucun point proche trouvé avec un seuil de {distance_threshold} m"}
 
 # Fonction pour exporter les résultats
 def export_to_excel(validation_results):
@@ -480,18 +466,98 @@ with tab3:
         if composite_data is not None:
             st.session_state.composite_data = composite_data
             st.dataframe(composite_data.head())
+            
+            # Réinitialiser le mapping de colonnes
+            st.session_state.column_mapping = {}
     
     if st.session_state.composite_data is not None:
+        # Interface pour le mapping des coordonnées
+        st.subheader("Mapping des coordonnées")
+        
+        with st.expander("Configurer le mapping des coordonnées", expanded=True):
+            st.markdown('<div class="mapping-box">', unsafe_allow_html=True)
+            st.markdown("""
+            Si vos données de composite utilisent des noms de colonnes différents pour les coordonnées,
+            vous pouvez spécifier ici quelles colonnes contiennent les coordonnées X, Y et Z.
+            """)
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                available_columns = list(st.session_state.composite_data.columns)
+                x_column = st.selectbox(
+                    "Sélectionner la colonne pour coordonnée X:",
+                    options=[""] + available_columns,
+                    index=available_columns.index('x') if 'x' in available_columns else 0,
+                    key="x_column"
+                )
+            
+            with col2:
+                y_column = st.selectbox(
+                    "Sélectionner la colonne pour coordonnée Y:",
+                    options=[""] + available_columns,
+                    index=available_columns.index('y') if 'y' in available_columns else 0,
+                    key="y_column"
+                )
+            
+            with col3:
+                z_column = st.selectbox(
+                    "Sélectionner la colonne pour coordonnée Z:",
+                    options=[""] + available_columns,
+                    index=available_columns.index('z') if 'z' in available_columns else 0,
+                    key="z_column"
+                )
+            
+            # Bouton pour appliquer le mapping
+            if st.button("Appliquer le mapping de coordonnées"):
+                mapping = {}
+                if x_column:
+                    mapping['x'] = x_column
+                if y_column:
+                    mapping['y'] = y_column
+                if z_column:
+                    mapping['z'] = z_column
+                
+                if len(mapping) == 3:
+                    st.session_state.column_mapping = mapping
+                    st.success("Mapping de coordonnées appliqué!")
+                else:
+                    st.error("Veuillez sélectionner toutes les colonnes de coordonnées (X, Y et Z).")
+            
+            st.markdown('</div>', unsafe_allow_html=True)
+        
+        # Paramètres de validation
         st.subheader("Paramètres de validation des composites")
         
         distance_threshold = st.slider("Seuil de distance pour échantillons proches (m)", 0.01, 5.0, 0.5, 0.01)
         
+        # Afficher un résumé du mapping actuel
+        if st.session_state.column_mapping:
+            st.info(f"""
+            Mapping actuel des coordonnées:
+            - X ➔ {st.session_state.column_mapping['x']}
+            - Y ➔ {st.session_state.column_mapping['y']}
+            - Z ➔ {st.session_state.column_mapping['z']}
+            """)
+        
         if st.button("Vérifier les composites proches"):
             with st.spinner("Analyse en cours..."):
-                close_points = check_nearby_composites(st.session_state.composite_data, distance_threshold)
+                # Utiliser le mapping de colonnes s'il existe
+                result = check_nearby_composites(
+                    st.session_state.composite_data,
+                    distance_threshold,
+                    st.session_state.column_mapping if st.session_state.column_mapping else None
+                )
                 
-                if close_points:
-                    st.warning(f"Détection de {len(close_points)} paires d'échantillons composites proches")
+                if result is None:
+                    st.error("Erreur inattendue lors de l'analyse des composites proches.")
+                elif result['status'] == 'error':
+                    st.error(f"Erreur: {result.get('message', 'Une erreur est survenue pendant l\'analyse')}")
+                elif result['status'] == 'empty':
+                    st.success(f"Aucune paire d'échantillons composites n'a été trouvée à moins de {distance_threshold} mètres l'un de l'autre.")
+                elif result['status'] == 'success':
+                    close_points = result['points']
+                    st.warning(f"Détection de {result['count']} paires d'échantillons composites proches")
                     
                     # Créer un DataFrame pour afficher les résultats
                     close_df = pd.DataFrame([{
@@ -510,13 +576,18 @@ with tab3:
                     
                     # Afficher une visualisation 3D des points proches
                     if st.checkbox("Afficher une visualisation 3D des points proches"):
+                        # Déterminer les colonnes à utiliser pour la visualisation
+                        x_col = st.session_state.column_mapping.get('x', 'x') if st.session_state.column_mapping else 'x'
+                        y_col = st.session_state.column_mapping.get('y', 'y') if st.session_state.column_mapping else 'y'
+                        z_col = st.session_state.column_mapping.get('z', 'z') if st.session_state.column_mapping else 'z'
+                        
                         fig = go.Figure()
                         
                         # Ajouter tous les points
                         fig.add_trace(go.Scatter3d(
-                            x=st.session_state.composite_data['x'],
-                            y=st.session_state.composite_data['y'],
-                            z=st.session_state.composite_data['z'],
+                            x=st.session_state.composite_data[x_col],
+                            y=st.session_state.composite_data[y_col],
+                            z=st.session_state.composite_data[z_col],
                             mode='markers',
                             marker=dict(
                                 size=3,
@@ -535,9 +606,9 @@ with tab3:
                         close_points_df = st.session_state.composite_data.iloc[list(close_indices)]
                         
                         fig.add_trace(go.Scatter3d(
-                            x=close_points_df['x'],
-                            y=close_points_df['y'],
-                            z=close_points_df['z'],
+                            x=close_points_df[x_col],
+                            y=close_points_df[y_col],
+                            z=close_points_df[z_col],
                             mode='markers',
                             marker=dict(
                                 size=5,
@@ -573,8 +644,6 @@ with tab3:
                             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                             filename = f"composites_proches_{timestamp}.xlsx"
                             st.markdown(get_download_link(output.getvalue(), filename), unsafe_allow_html=True)
-                else:
-                    st.success(f"Aucune paire d'échantillons composites n'a été trouvée à moins de {distance_threshold} mètres l'un de l'autre.")
 
 # Pied de page
 st.markdown("---")
