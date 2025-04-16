@@ -6,7 +6,6 @@ import matplotlib.pyplot as plt
 import plotly.express as px
 import plotly.graph_objects as go
 from sklearn.neighbors import NearestNeighbors
-from scipy.spatial import KDTree
 import base64
 from datetime import datetime
 
@@ -194,108 +193,131 @@ def check_duplicates(data, file_type):
     else:
         return pd.DataFrame()
 
-# Fonction améliorée pour vérifier les échantillons composites proches
+# Fonction complètement révisée pour vérifier les composites proches
 def check_nearby_composites(composite_data, distance_threshold=0.1, column_mapping=None):
-    # Appliquer le mapping de colonnes si fourni
-    if column_mapping and all(k in column_mapping for k in ['x', 'y', 'z']):
-        temp_data = composite_data.copy()
-        for target_col, source_col in column_mapping.items():
-            if source_col in composite_data.columns:
-                temp_data[target_col] = temp_data[source_col]
-        composite_data = temp_data
-    
-    # Vérifier si les colonnes de coordonnées existent
-    required_columns = ['x', 'y', 'z']
-    missing_columns = [col for col in required_columns if col not in composite_data.columns]
-    
-    if missing_columns:
-        return {'status': 'error', 'message': f"Colonnes manquantes dans les données de composite: {', '.join(missing_columns)}"}
-    
-    # Vérifier si les colonnes contiennent des données numériques
-    for col in required_columns:
-        if not pd.api.types.is_numeric_dtype(composite_data[col]):
-            try:
-                # Essayer de convertir en nombre
-                composite_data[col] = pd.to_numeric(composite_data[col])
-            except Exception as e:
-                return {'status': 'error', 'message': f"Échec de conversion de la colonne '{col}' en type numérique: {str(e)}"}
-    
-    # Vérifier les valeurs manquantes
-    missing_values = composite_data[required_columns].isna().sum().sum()
-    if missing_values > 0:
-        st.warning(f"Les données contiennent {missing_values} valeurs manquantes dans les coordonnées. Ces points seront ignorés.")
-        composite_data = composite_data.dropna(subset=required_columns)
-    
-    # Extraire les coordonnées
-    coords = composite_data[required_columns].values
-    
-    # Vérifier qu'il reste suffisamment de points
-    if len(coords) < 2:
-        return {'status': 'error', 'message': "Pas assez de points avec des coordonnées valides pour effectuer l'analyse."}
-    
-    # Statistics avant de commencer
-    point_count = len(coords)
-    st.info(f"Analyse de {point_count} points avec un seuil de distance de {distance_threshold} m")
-    
-    # Utiliser un arbre KD pour trouver les points proches de manière efficace
     try:
-        tree = KDTree(coords)
+        # Appliquer le mapping de colonnes si fourni
+        if column_mapping and all(k in column_mapping for k in ['x', 'y', 'z']):
+            temp_data = composite_data.copy()
+            for target_col, source_col in column_mapping.items():
+                if source_col in composite_data.columns:
+                    temp_data[target_col] = temp_data[source_col]
+            composite_data = temp_data
         
-        # Chercher tous les points dans un rayon de distance_threshold
-        # Retourne les paires d'indices où les points sont à moins de distance_threshold l'un de l'autre
-        pairs = tree.query_pairs(distance_threshold, output_type='ndarray')
+        # Vérifier si les colonnes de coordonnées existent
+        required_columns = ['x', 'y', 'z']
+        missing_columns = [col for col in required_columns if col not in composite_data.columns]
         
-        # Si aucune paire n'est trouvée
-        if len(pairs) == 0:
+        if missing_columns:
+            return {'status': 'error', 'message': f"Colonnes manquantes dans les données de composite: {', '.join(missing_columns)}"}
+        
+        # Vérifier si les colonnes contiennent des données numériques
+        for col in required_columns:
+            if not pd.api.types.is_numeric_dtype(composite_data[col]):
+                try:
+                    # Essayer de convertir en nombre
+                    composite_data[col] = pd.to_numeric(composite_data[col])
+                except Exception as e:
+                    return {'status': 'error', 'message': f"Échec de conversion de la colonne '{col}' en type numérique: {str(e)}"}
+        
+        # Vérifier les valeurs manquantes
+        missing_values = composite_data[required_columns].isna().sum().sum()
+        if missing_values > 0:
+            st.warning(f"Les données contiennent {missing_values} valeurs manquantes dans les coordonnées. Ces points seront ignorés.")
+            composite_data = composite_data.dropna(subset=required_columns)
+        
+        # Statistiques avant de commencer
+        point_count = len(composite_data)
+        st.info(f"Analyse de {point_count} composites avec un seuil de distance de {distance_threshold} m")
+        
+        # Créer une nouvelle colonne combinant les coordonnées arrondies
+        decimals = max(0, int(-np.log10(distance_threshold)) + 1)  # Nombre de décimales selon le seuil
+        
+        # Arrondir les coordonnées au niveau de précision spécifié
+        composite_data['x_rounded'] = composite_data['x'].round(decimals)
+        composite_data['y_rounded'] = composite_data['y'].round(decimals)
+        composite_data['z_rounded'] = composite_data['z'].round(decimals)
+        
+        # Identifier les points avec des coordonnées arrondies identiques
+        composite_data['coord_group'] = composite_data.apply(
+            lambda row: f"{row['x_rounded']}_{row['y_rounded']}_{row['z_rounded']}", axis=1
+        )
+        
+        # Compter les occurrences de chaque combinaison de coordonnées
+        coord_counts = composite_data['coord_group'].value_counts()
+        
+        # Filtrer pour ne garder que les groupes avec au moins 2 points
+        duplicate_groups = coord_counts[coord_counts >= 2].index.tolist()
+        
+        if not duplicate_groups:
             return {'status': 'empty', 'message': f"Aucun point proche trouvé avec un seuil de {distance_threshold} m"}
         
-        # Convertir les paires en un format plus utile
-        close_points = []
-        for i, j in pairs:
-            i, j = int(i), int(j)  # Convertir en entiers pour l'indexation
-            # Calculer la distance entre les points
-            dist = np.linalg.norm(coords[i] - coords[j])
-            close_points.append({
-                'point1_index': i,
-                'point2_index': j,
-                'distance': float(dist),
-                'point1_holeid': composite_data.iloc[i]['holeid'] if 'holeid' in composite_data.columns else f"Point_{i}",
-                'point2_holeid': composite_data.iloc[j]['holeid'] if 'holeid' in composite_data.columns else f"Point_{j}",
-                'point1_coords': coords[i],
-                'point2_coords': coords[j]
-            })
+        # Récupérer tous les points appartenant aux groupes dupliqués
+        duplicate_points = composite_data[composite_data['coord_group'].isin(duplicate_groups)].copy()
         
-        # Tri des résultats par distance (croissante)
-        close_points.sort(key=lambda x: x['distance'])
+        # Ajouter une colonne pour indiquer la distance au seuil
+        duplicate_points['threshold'] = distance_threshold
         
-        # Limiter le nombre de résultats pour l'affichage si nécessaire
-        display_limit = 10000  # Limite arbitraire pour l'affichage
-        if len(close_points) > display_limit:
-            st.warning(f"Plus de {display_limit} paires trouvées. Seules les {display_limit} paires les plus proches seront affichées.")
-            display_points = close_points[:display_limit]
+        # Compter les points dans chaque groupe
+        group_sizes = duplicate_points.groupby('coord_group').size()
+        
+        # Pour chaque groupe, calculer explicitement les distances entre points
+        result_rows = []
+        
+        for group in duplicate_groups:
+            group_data = duplicate_points[duplicate_points['coord_group'] == group]
+            group_coords = group_data[['x', 'y', 'z']].values
+            
+            # Si le groupe est très grand, avertir l'utilisateur
+            if len(group_data) > 100:
+                st.warning(f"Le groupe {group} contient {len(group_data)} points - analyse limitée aux premiers points.")
+                group_data = group_data.head(100)
+                group_coords = group_data[['x', 'y', 'z']].values
+            
+            # Calculer toutes les distances entre les points du groupe
+            for i in range(len(group_data)):
+                for j in range(i+1, len(group_data)):
+                    dist = np.linalg.norm(group_coords[i] - group_coords[j])
+                    if dist <= distance_threshold:
+                        row_i = group_data.iloc[i].copy()
+                        row_j = group_data.iloc[j].copy()
+                        row_i['distance'] = dist
+                        row_i['duplicate_index'] = group_data.index[j]
+                        result_rows.append(row_i)
+        
+        if not result_rows:
+            return {'status': 'empty', 'message': f"Après vérification précise, aucun point n'est à moins de {distance_threshold} m l'un de l'autre."}
+        
+        # Créer un DataFrame final
+        results_df = pd.DataFrame(result_rows)
+        
+        # Trier par distance
+        results_df.sort_values('distance', inplace=True)
+        
+        # Limiter le nombre de résultats si nécessaire
+        display_limit = 1000
+        if len(results_df) > display_limit:
+            display_df = results_df.head(display_limit)
+            st.warning(f"Plus de {display_limit} doublons trouvés. Seuls les {display_limit} plus proches seront affichés.")
         else:
-            display_points = close_points
+            display_df = results_df
         
-        # Calculer le nombre de points uniques impliqués dans des paires
-        unique_points = set()
-        for cp in close_points:
-            unique_points.add(cp['point1_index'])
-            unique_points.add(cp['point2_index'])
-        
-        # Retourner les résultats avec un statut
+        # Retourner le résultat avec la structure originale des données
         return {
-            'status': 'success', 
-            'points': display_points,
-            'count': len(close_points),
+            'status': 'success',
+            'data': display_df,
+            'full_data': results_df,
+            'count': len(results_df),
             'total_points': point_count,
-            'total_distinct_points': len(unique_points)
+            'duplicate_groups': len(duplicate_groups),
+            'point_format': composite_data.columns.tolist()
         }
-    
+        
     except Exception as e:
         import traceback
-        st.error(f"Erreur lors de l'analyse des voisins les plus proches: {str(e)}")
+        st.error(f"Erreur lors de l'analyse des points proches: {str(e)}")
         st.error(traceback.format_exc())
-        return {'status': 'error', 'message': f"Erreur lors de l'analyse des voisins: {str(e)}"}
+        return {'status': 'error', 'message': f"Erreur d'analyse: {str(e)}"}
 
 # Fonction pour exporter les résultats
 def export_to_excel(validation_results):
@@ -592,32 +614,40 @@ with tab3:
                 elif result['status'] == 'error':
                     st.error(f"Erreur: {result.get('message', 'Une erreur est survenue pendant l\'analyse')}")
                 elif result['status'] == 'empty':
-                    st.success(f"Aucune paire d'échantillons composites n'a été trouvée à moins de {distance_threshold} mètres l'un de l'autre.")
+                    st.success(f"Aucun composite n'a été trouvé à moins de {distance_threshold} mètres l'un de l'autre.")
                 elif result['status'] == 'success':
-                    close_points = result['points']
-                    unique_points_count = result.get('total_distinct_points', 0)
-                    total_points = result.get('total_points', 0)
+                    st.warning(f"Détection de {result['count']} composites trop proches (distance < {distance_threshold} m)")
                     
-                    st.warning(f"Détection de {result['count']} paires d'échantillons composites proches")
-                    st.info(f"{unique_points_count} points distincts sur {total_points} ({unique_points_count/total_points*100:.1f}%) sont impliqués dans des paires proches")
+                    # Sélectionner les colonnes à afficher dans le tableau de résultats
+                    # Nous affichons les colonnes originales plus la colonne de distance
                     
-                    # Créer un DataFrame pour afficher les résultats
-                    close_df = pd.DataFrame([{
-                        'holeid_1': cp['point1_holeid'],
-                        'holeid_2': cp['point2_holeid'],
-                        'distance (m)': cp['distance'],
-                        'x1': cp['point1_coords'][0],
-                        'y1': cp['point1_coords'][1],
-                        'z1': cp['point1_coords'][2],
-                        'x2': cp['point2_coords'][0],
-                        'y2': cp['point2_coords'][1],
-                        'z2': cp['point2_coords'][2]
-                    } for cp in close_points])
+                    display_df = result['data']
                     
-                    st.dataframe(close_df)
+                    # Colonnes clés à afficher en premier (toujours montrer ces colonnes si elles existent)
+                    key_columns = ['holeid', 'from', 'to', 'x', 'y', 'z', 'distance']
+                    
+                    # Déterminer les colonnes à afficher
+                    display_columns = []
+                    for col in key_columns:
+                        if col in display_df.columns:
+                            display_columns.append(col)
+                    
+                    # Ajouter un lien vers le doublon si possible
+                    if 'duplicate_index' in display_df.columns:
+                        st.info("Cliquez sur n'importe quelle ligne pour voir les détails des deux composites proches.")
+                        
+                        # Affichage des données avec les composites dupliqués
+                        selected_index = None
+                        
+                        # Afficher le tableau avec les colonnes principales
+                        st.dataframe(display_df[display_columns])
+                        
+                        # Option pour afficher toutes les colonnes
+                        if st.checkbox("Afficher toutes les colonnes"):
+                            st.dataframe(display_df)
                     
                     # Afficher une visualisation 3D des points proches
-                    if st.checkbox("Afficher une visualisation 3D des points proches"):
+                    if st.checkbox("Afficher une visualisation 3D des composites proches"):
                         # Déterminer les colonnes à utiliser pour la visualisation
                         x_col = st.session_state.column_mapping.get('x', 'x') if st.session_state.column_mapping else 'x'
                         y_col = st.session_state.column_mapping.get('y', 'y') if st.session_state.column_mapping else 'y'
@@ -631,47 +661,60 @@ with tab3:
                             st.warning(f"Réduction du nombre de points affichés à {max_display_points} pour la visualisation (sur {len(composite_viz)} au total)")
                             composite_viz = composite_viz.sample(max_display_points, random_state=42)
                         
+                        # Déterminer les indices des points à mettre en évidence
+                        highlight_indices = set(display_df.index.tolist())
+                        duplicate_indices = set()
+                        if 'duplicate_index' in display_df.columns:
+                            duplicate_indices = set(display_df['duplicate_index'].tolist())
+                        
+                        # Créer des masques pour les types de points
+                        regular_mask = ~composite_viz.index.isin(highlight_indices) & ~composite_viz.index.isin(duplicate_indices)
+                        highlight_mask = composite_viz.index.isin(highlight_indices)
+                        duplicate_mask = composite_viz.index.isin(duplicate_indices)
+                        
                         fig = go.Figure()
                         
-                        # Ajouter tous les points
+                        # Ajouter les points réguliers
                         fig.add_trace(go.Scatter3d(
-                            x=composite_viz[x_col],
-                            y=composite_viz[y_col],
-                            z=composite_viz[z_col],
+                            x=composite_viz.loc[regular_mask, x_col],
+                            y=composite_viz.loc[regular_mask, y_col],
+                            z=composite_viz.loc[regular_mask, z_col],
                             mode='markers',
                             marker=dict(
                                 size=3,
-                                color='blue',
+                                color='lightblue',
                                 opacity=0.5
                             ),
-                            name='Tous les composites'
+                            name='Composites réguliers'
                         ))
                         
-                        # Collecter les indices des points proches
-                        close_indices = set()
-                        for cp in close_points:
-                            close_indices.add(cp['point1_index'])
-                            close_indices.add(cp['point2_index'])
+                        # Ajouter les points en évidence
+                        if any(highlight_mask):
+                            fig.add_trace(go.Scatter3d(
+                                x=composite_viz.loc[highlight_mask, x_col],
+                                y=composite_viz.loc[highlight_mask, y_col],
+                                z=composite_viz.loc[highlight_mask, z_col],
+                                mode='markers',
+                                marker=dict(
+                                    size=5,
+                                    color='red',
+                                ),
+                                name='Composites proches (source)'
+                            ))
                         
-                        # Limiter le nombre de points proches pour la visualisation
-                        close_indices = list(close_indices)
-                        if len(close_indices) > max_display_points:
-                            st.warning(f"Réduction du nombre de points proches affichés à {max_display_points} (sur {len(close_indices)} au total)")
-                            close_indices = close_indices[:max_display_points]
-                        
-                        close_points_df = st.session_state.composite_data.iloc[close_indices]
-                        
-                        fig.add_trace(go.Scatter3d(
-                            x=close_points_df[x_col],
-                            y=close_points_df[y_col],
-                            z=close_points_df[z_col],
-                            mode='markers',
-                            marker=dict(
-                                size=5,
-                                color='red',
-                            ),
-                            name='Composites proches'
-                        ))
+                        # Ajouter les points dupliqués
+                        if any(duplicate_mask):
+                            fig.add_trace(go.Scatter3d(
+                                x=composite_viz.loc[duplicate_mask, x_col],
+                                y=composite_viz.loc[duplicate_mask, y_col],
+                                z=composite_viz.loc[duplicate_mask, z_col],
+                                mode='markers',
+                                marker=dict(
+                                    size=5,
+                                    color='orange',
+                                ),
+                                name='Composites proches (cible)'
+                            ))
                         
                         fig.update_layout(
                             title='Visualisation 3D des composites',
@@ -691,15 +734,16 @@ with tab3:
                         )
                         
                         st.plotly_chart(fig, use_container_width=True)
-                        
-                        # Permettre l'exportation des résultats
-                        if st.button("Exporter les résultats des composites proches"):
-                            output = io.BytesIO()
-                            close_df.to_excel(output, index=False)
-                            output.seek(0)
-                            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                            filename = f"composites_proches_{timestamp}.xlsx"
-                            st.markdown(get_download_link(output.getvalue(), filename), unsafe_allow_html=True)
+                    
+                    # Permettre l'exportation des résultats
+                    if st.button("Exporter les résultats des composites proches"):
+                        output = io.BytesIO()
+                        # Exporter toutes les données, pas seulement celles affichées
+                        result['full_data'].to_excel(output, index=True)
+                        output.seek(0)
+                        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                        filename = f"composites_proches_{timestamp}.xlsx"
+                        st.markdown(get_download_link(output.getvalue(), filename), unsafe_allow_html=True)
 
 # Pied de page
 st.markdown("---")
